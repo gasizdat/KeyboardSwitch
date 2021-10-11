@@ -504,16 +504,27 @@ namespace KBS_Win
                 System.Threading.Thread.Sleep(100);
                 if (Clipboard.ContainsText(TextDataFormat.Text))
                 {
-                    var text = Clipboard.GetText(TextDataFormat.Text);
-                    NextKeyboardLayout();
-                    _writeIndex = 0;
-                    var currentEditor = KeyboardEmulator.ForegroundEdit;
-                    foreach (var c in text)
+                    lock (this)
                     {
-                        var keyInfo = new KeyInfo((Keys)c, KeyboardMonitor.GetScanCode(c), 0, false, false);
-                        foreach (var new_c in KeyboardEmulator.GetChars(keyInfo))
+                        try
                         {
-                            KeyboardEmulator.CharKey(currentEditor, new_c, keyInfo.HardwareScanCode, 1);
+                            _suppressKeyboardProcessing = true;
+                            var text = Clipboard.GetText(TextDataFormat.Text);
+                            NextKeyboardLayout();
+                            _writeIndex = 0;
+                            var currentEditor = KeyboardEmulator.ForegroundEdit;
+                            foreach (var c in text)
+                            {
+                                var keyInfo = new KeyInfo((Keys)c, KeyboardMonitor.GetScanCode(c), 0, false, false);
+                                foreach (var new_c in KeyboardEmulator.GetChars(keyInfo))
+                                {
+                                    KeyboardEmulator.CharKey(currentEditor, new_c, keyInfo.HardwareScanCode, 1);
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            _suppressKeyboardProcessing = false;
                         }
                     }
                 }
@@ -526,10 +537,21 @@ namespace KBS_Win
             {
                 System.Threading.Tasks.Task.Run(() =>
                 {
-                    RemoveTextWithBackspace();
-                    System.Threading.Thread.Sleep(100);
-                    NextKeyboardLayout();
-                    InsertConvertedChars();
+                    lock (this)
+                    {
+                        try
+                        {
+                            _suppressKeyboardProcessing = true;
+                            RemoveTextWithBackspace();
+                            System.Threading.Thread.Sleep(100);
+                            NextKeyboardLayout();
+                            InsertConvertedChars();
+                        }
+                        finally
+                        {
+                            _suppressKeyboardProcessing = false;
+                        }
+                    }
                 });
             }
         }
@@ -573,16 +595,31 @@ namespace KBS_Win
             }
         }
 
+        private void OnSymbolEnter(GlobalKeyboardHookEventArgs e)
+        {
+            if (IsChar(e.KeyboardData))
+            {
+                _lastEntered[_writeIndex++] = new KeyInfo(e.KeyboardData, _Shifted, false);
+                if (_writeIndex >= _lastEntered.Length)
+                {
+                    _writeIndex = _lastEntered.Length - 1;
+                }
+            }
+        }
+
         private void OnKeyUp(GlobalKeyboardHookEventArgs e)
         {
             switch (checked((Keys)e.KeyboardData.VirtualCode))
             {
+                case Keys.ControlKey:
+                case Keys.LControlKey:
+                case Keys.RControlKey:
+                    break;
                 case Keys.Scroll:
                     {
                         InplaceChangeTextToNextKeyboardLayout();
                         break;
                     }
-
                 case Keys.RShiftKey:
                 case Keys.LShiftKey:
                     {
@@ -610,8 +647,13 @@ namespace KBS_Win
                         OnBackspace();
                         break;
                     }
-                case Keys.Enter:
                 case Keys.Space:
+                    {
+                        _spaceEntered = true;
+                        OnSymbolEnter(e);
+                        break;
+                    }
+                case Keys.Enter:
                 case Keys.Delete:
                 case Keys.PageUp:
                 case Keys.PageDown:
@@ -621,6 +663,7 @@ namespace KBS_Win
                 case Keys.Up:
                 case Keys.Right:
                 case Keys.Down:
+                case Keys.Tab:
                     {
                         OnDrop();
                         break;
@@ -632,14 +675,13 @@ namespace KBS_Win
                             OnDrop();
                         }
 
-                        if (IsChar(e.KeyboardData))
+                        if (_spaceEntered)
                         {
-                            _lastEntered[_writeIndex++] = new KeyInfo(e.KeyboardData, _Shifted, false);
-                            if (_writeIndex >= _lastEntered.Length)
-                            {
-                                _writeIndex = _lastEntered.Length - 1;
-                            }
+                            _spaceEntered = false;
+                            OnDrop();
                         }
+
+                        OnSymbolEnter(e);
 
                         break;
                     }
@@ -648,18 +690,27 @@ namespace KBS_Win
 
         private void OnKeyPressed(object sender, GlobalKeyboardHookEventArgs e)
         {
-            switch (e.messageCode)
+            if (!_suppressKeyboardProcessing)
             {
-                case MsgCode.WM_KEYDOWN:
+                lock (this)
+                {
+                    if (!_suppressKeyboardProcessing)
                     {
-                        OnKeyDown(e);
-                        break;
+                        switch (e.messageCode)
+                        {
+                            case MsgCode.WM_KEYDOWN:
+                                {
+                                    OnKeyDown(e);
+                                    break;
+                                }
+                            case MsgCode.WM_KEYUP:
+                                {
+                                    OnKeyUp(e);
+                                    break;
+                                }
+                        }
                     }
-                case MsgCode.WM_KEYUP:
-                    {
-                        OnKeyUp(e);
-                        break;
-                    }
+                }
             }
         }
 
@@ -669,6 +720,8 @@ namespace KBS_Win
         private readonly KeyInfo[] _lastEntered = new KeyInfo[1024];
         private bool _Shifted = false;
         private bool _InplaceChangeRequest = false;
+        private bool _spaceEntered = false;
+        private bool _suppressKeyboardProcessing = false;
     }
 
     static class Program
