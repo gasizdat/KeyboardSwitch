@@ -142,6 +142,9 @@ namespace Win32
         [DllImport("USER32")]
         public static extern int MapVirtualKey(int keyCode, int mapType = Interop.MAPVK_VK_TO_VSC);
 
+        [DllImport("USER32", CharSet = CharSet.Auto, ExactSpelling = true, CallingConvention = CallingConvention.Winapi)]
+        public static extern short GetKeyState(int keyCode);
+
         public static void PostMessage(IntPtr hWnd, uint msg, int wParam, int lParam)
         {
             for (var i = 0; i < 100; i++)
@@ -180,6 +183,11 @@ namespace Win32
             keybd_event((byte)keyCode.ToInt(), (byte)MapVirtualKey(keyCode.ToInt()), dwFlags, dwExtraInfo);
         }
 
+        public static bool GetKeyState(Keys keyCode)
+        {
+            return GetKeyStateWin32(keyCode.ToInt()) != 0;
+        }
+
         [DllImport("USER32", CharSet = CharSet.Auto)]
         public static extern bool SendMessage(IntPtr hWnd, uint msg, int wParam, int lParam);
 
@@ -197,6 +205,9 @@ namespace Win32
 
         [DllImport("User32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("USER32", CharSet = CharSet.Auto, EntryPoint = "GetKeyState", ExactSpelling = true, CallingConvention = CallingConvention.Winapi)]
+        private static extern short GetKeyStateWin32(int keyCode);
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -417,6 +428,44 @@ namespace KBS_Win
             Interop.KeyboardEvent(handle, Keys.C, KeyEvent.KEYEVENTF_KEYDOWN, 0);
             Interop.KeyboardEvent(handle, Keys.C, KeyEvent.KEYEVENTF_KEYUP, 0);
             Interop.KeyboardEvent(handle, Keys.ControlKey, KeyEvent.KEYEVENTF_KEYUP, 0);
+
+            if (Interop.GetKeyState(Keys.Scroll))
+            {
+                Interop.KeyboardEvent(handle, Keys.Scroll, KeyEvent.KEYEVENTF_KEYDOWN, 0);
+                Interop.KeyboardEvent(handle, Keys.Scroll, KeyEvent.KEYEVENTF_KEYUP, 0);
+            }
+        }
+    }
+
+    class ProgramIcon
+    {
+        System.ComponentModel.Container components;
+        System.Windows.Forms.NotifyIcon tryIcon;
+
+        public void CreateNotifyicon()
+        {
+            components = new System.ComponentModel.Container();
+
+            tryIcon = new System.Windows.Forms.NotifyIcon(this.components);
+            var appIcon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            tryIcon.Icon = appIcon;
+            tryIcon.Text = "Keyboard switcher";
+            tryIcon.Visible = true;
+            tryIcon.ContextMenuStrip = new ContextMenuStrip(components);
+            var exitItem = tryIcon.ContextMenuStrip.Items.Add("Exit");
+            exitItem.Click += (object o, EventArgs e) => Application.Exit();
+            var autoRun = tryIcon.ContextMenuStrip.Items.Add("Add to autorun");
+            autoRun.Click += (object o, EventArgs e) =>
+            {
+                try
+                {
+                    var reg = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
+                    reg.SetValue("KBS", Application.ExecutablePath);
+                }
+                catch
+                {
+                }
+            };
         }
     }
 
@@ -425,6 +474,8 @@ namespace KBS_Win
         [STAThread]
         static void Main()
         {
+            var p = new ProgramIcon();
+            p.CreateNotifyicon();
             Application.Run();
         }
 
@@ -527,55 +578,89 @@ namespace KBS_Win
             }
         }
 
+        private static void AsyncExecute(System.Threading.ThreadStart proc)
+        {
+            var thread = new System.Threading.Thread(proc);
+            thread.SetApartmentState(System.Threading.ApartmentState.STA);
+            thread.Start();
+        }
+
         private static void InplaceChangeTextToNextKeyboardLayout()
         {
-            if (IsSameEditor())
+            if (IsSameEditor() && !m_ñhangeRequest)
             {
-                var currentEditor = KeyboardEmulator.ForegroundEdit;
-                System.Threading.Thread.Sleep(100);
-                KeyboardEmulator.CopyToClipboard(currentEditor);
-                System.Threading.Thread.Sleep(100);
-                var text = TryGetTextFromClipboard();
-                if (null != text)
+                m_ñhangeRequest = true;
+                AsyncExecute(() =>
                 {
                     lock (m_syncObj)
                     {
                         try
                         {
                             m_suppressKeyboardProcessing = true;
-                            Bucket backet;
-                            if (m_transliterationIndex.TryGetValue(InputLanguage.CurrentInputLanguage, out backet))
+                            var currentEditor = KeyboardEmulator.ForegroundEdit;
+                            System.Threading.Thread.Sleep(100);
+                            KeyboardEmulator.CopyToClipboard(currentEditor);
+                            System.Threading.Thread.Sleep(100);
+                            var text = TryGetTextFromClipboard();
+                            if (null != text)
                             {
-                                NextKeyboardLayout();
-                                m_writeIndex = 0;
-                                foreach (var originalChar in text)
+                                lock (m_syncObj)
                                 {
-                                    KeyInfo keyInfo;
-                                    if (backet.TryGetValue($"{originalChar}", out keyInfo))
+                                    try
                                     {
-                                        foreach (var transliteratedChar in KeyboardEmulator.GetChars(keyInfo))
+                                        m_suppressKeyboardProcessing = true;
+                                        Bucket backet;
+                                        if (m_transliterationIndex.TryGetValue(InputLanguage.CurrentInputLanguage, out backet))
                                         {
-                                            KeyboardEmulator.CharKey(currentEditor, transliteratedChar, keyInfo.ScanCode, 1);
+                                            NextKeyboardLayout();
+                                            m_writeIndex = 0;
+                                            foreach (var originalChar in text)
+                                            {
+                                                KeyInfo keyInfo;
+                                                if (backet.TryGetValue($"{originalChar}", out keyInfo))
+                                                {
+                                                    foreach (var transliteratedChar in KeyboardEmulator.GetChars(keyInfo))
+                                                    {
+                                                        KeyboardEmulator.CharKey(currentEditor, transliteratedChar, keyInfo.ScanCode, 1);
+                                                    }
+                                                }
+                                            }
+
+                                            //System.Threading.Thread.Sleep(100);
+
+                                            //Interop.KeyboardEvent(currentEditor, Keys.ShiftKey, KeyEvent.KEYEVENTF_KEYDOWN, 0);
+                                            //foreach (var originalChar in text)
+                                            //{
+                                            //    Interop.KeyboardEvent(currentEditor, Keys.Left, KeyEvent.KEYEVENTF_KEYDOWN, 0);
+                                            //    Interop.KeyboardEvent(currentEditor, Keys.Left, KeyEvent.KEYEVENTF_KEYUP, 0);
+                                            //}
+                                            //Interop.KeyboardEvent(currentEditor, Keys.ShiftKey, KeyEvent.KEYEVENTF_KEYUP, 0);
                                         }
+                                    }
+                                    finally
+                                    {
+                                        m_suppressKeyboardProcessing = false;
                                     }
                                 }
                             }
+                            Clipboard.Clear();
                         }
                         finally
                         {
                             m_suppressKeyboardProcessing = false;
+                            m_ñhangeRequest = false;
                         }
                     }
-                }
-                //Clipboard.Clear();
+                });
             }
         }
 
         private static void ChangeTextToNextKeyboardLayout()
         {
-            if (IsSameEditor())
+            if (IsSameEditor() && !m_ñhangeRequest)
             {
-                System.Threading.Tasks.Task.Run(() =>
+                m_ñhangeRequest = true;
+                AsyncExecute(() =>
                 {
                     lock (m_syncObj)
                     {
@@ -590,6 +675,7 @@ namespace KBS_Win
                         finally
                         {
                             m_suppressKeyboardProcessing = false;
+                            m_ñhangeRequest = false;
                         }
                     }
                 });
@@ -626,10 +712,18 @@ namespace KBS_Win
         {
             switch (checked((Keys)e.KeyboardData.VirtualCode))
             {
+                case Keys.ShiftKey:
                 case Keys.RShiftKey:
                 case Keys.LShiftKey:
                 {
                     m_shifted = true;
+                    break;
+                }
+                case Keys.ControlKey:
+                case Keys.RControlKey:
+                case Keys.LControlKey:
+                {
+                    m_control = true;
                     break;
                 }
             }
@@ -654,19 +748,23 @@ namespace KBS_Win
                 case Keys.ControlKey:
                 case Keys.LControlKey:
                 case Keys.RControlKey:
+                {
+                    m_control = false;
                     break;
+                }
                 case Keys.Scroll:
                 {
                     InplaceChangeTextToNextKeyboardLayout();
                     break;
                 }
+                case Keys.ShiftKey:
                 case Keys.RShiftKey:
                 case Keys.LShiftKey:
                 {
                     m_shifted = false;
                     if (m_inplaceChangeRequest)
                     {
-                        InplaceChangeTextToNextKeyboardLayout();
+                        //InplaceChangeTextToNextKeyboardLayout();
                     }
                     break;
                 }
@@ -710,6 +808,12 @@ namespace KBS_Win
                 }
                 default:
                 {
+                    if (m_control)
+                    {
+                        OnDrop();
+                        break;
+                    }
+
                     if (!IsSameEditor())
                     {
                         OnDrop();
@@ -760,7 +864,9 @@ namespace KBS_Win
         private static int m_writeIndex = 0;
         private static IntPtr m_lastEditor = IntPtr.MaxValue;
         private static readonly KeyInfo[] m_lastEntered = new KeyInfo[1024];
+        private static bool m_control = false;
         private static bool m_shifted = false;
+        private static bool m_ñhangeRequest = false;
         private static bool m_inplaceChangeRequest = false;
         private static bool m_spaceEntered = false;
         private static bool m_suppressKeyboardProcessing = false;
